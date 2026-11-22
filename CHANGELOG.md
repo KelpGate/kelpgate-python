@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.1
 
 - Fix `QuotaExceededError.usage`, which was always `None`: the service sends the number of scans used as `used`, and the client read `usage`. The client now reads `used`, and still reads `usage` if a response has that instead. The attribute name is unchanged.
 
