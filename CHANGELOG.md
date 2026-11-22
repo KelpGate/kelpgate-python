@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fix `QuotaExceededError.usage`, which was always `None`: the service sends the number of scans used as `used`, and the client read `usage`. The client now reads `used`, and still reads `usage` if a response has that instead. The attribute name is unchanged.
+
 ## 0.4.0
 
 - Every scan now sends an `Idempotency-Key`, so a retry after a timeout or a 502, 503 or 504 is not counted against your quota twice. The client makes a random key for each call and reuses it on its own retries; no change is needed in your code.

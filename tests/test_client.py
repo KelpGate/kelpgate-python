@@ -208,7 +208,7 @@ async def test_credentials_are_not_sent_across_a_redirect(make: Any, api: MockAp
 async def test_error_mapping(make: Any, api: MockApi) -> None:
     kg = make(**options(max_retries=0))
     cases = [
-        (402, {"error": "q", "quota": 10, "usage": 10, "upgrade_url": "https://u"}, K.QuotaExceededError),
+        (402, {"error": "q", "used": 10, "quota": 10, "upgrade_url": "https://u"}, K.QuotaExceededError),
         (413, {"error": "big", "upgrade_url": "https://u"}, K.PayloadTooLargeError),
         (415, {"error": "type"}, K.UnsupportedFileError),
         (429, {"error": "busy"}, K.RateLimitedError),
@@ -221,10 +221,28 @@ async def test_error_mapping(make: Any, api: MockApi) -> None:
         with pytest.raises(cls) as info:
             await call(kg.scan_bytes(b"x"))
         assert info.value.status == status and info.value.request_id == "req-test", status
-    api.fail_next.append((402, {"quota": 5, "usage": 6, "upgrade_url": "https://u"}, {}))
+
+
+@both
+async def test_quota_exceeded_reads_used_count(make: Any, api: MockApi) -> None:
+    kg = make(**options(max_retries=0))
+    # The body the scanning service sends on 402.
+    body = {
+        "status": "QUOTA_EXCEEDED",
+        "error": "Monthly scan quota of 5 scans exceeded (6 used).",
+        "used": 6,
+        "quota": 5,
+        "upgrade_url": "https://u",
+    }
+    api.fail_next.append((402, body, {}))
     with pytest.raises(K.QuotaExceededError) as q:
         await call(kg.scan_bytes(b"x"))
     assert (q.value.quota, q.value.usage, q.value.upgrade_url) == (5, 6, "https://u")
+    # A body with ``usage`` instead of ``used`` is still read.
+    api.fail_next.append((402, {"quota": 5, "usage": 7}, {}))
+    with pytest.raises(K.QuotaExceededError) as q:
+        await call(kg.scan_bytes(b"x"))
+    assert q.value.usage == 7
 
 
 @both
