@@ -49,7 +49,7 @@ async def test_clean_bytes(make: Any, api: MockApi) -> None:
 
 
 @both
-async def test_infected_file_from_path(make: Any, api: MockApi, tmp_path: Any = None) -> None:
+async def test_infected_file_from_path(make: Any, api: MockApi) -> None:
     import os
     import tempfile
 
