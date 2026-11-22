@@ -56,7 +56,10 @@ class QuotaExceededError(KelpgateError):
         super().__init__(message, code="QUOTA_EXCEEDED", **kw)
         body = _as_dict(kw.get("body"))
         self.quota: Optional[int] = body.get("quota")
-        self.usage: Optional[int] = body.get("usage")
+        # The service sends the count as ``used``; ``usage`` is read as a fallback.
+        used = body.get("used")
+        self.usage: Optional[int] = used if used is not None else body.get("usage")
+        """Scans used this month (the ``used`` field of the 402 response)."""
         self.upgrade_url: Optional[str] = body.get("upgrade_url")
 
 
