@@ -1,125 +1,180 @@
 # Kelpgate Client for Python
 
-**Check every upload for malware before your app stores it.**
+[![PyPI](https://img.shields.io/pypi/v/kelpgate-client)](https://pypi.org/project/kelpgate-client/)
+[![CI](https://github.com/KelpGate/kelpgate-python/actions/workflows/ci.yml/badge.svg)](https://github.com/KelpGate/kelpgate-python/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-Python client for the [Kelpgate](https://kelpgate.cloud) malware-scanning API. Scan uploaded files or remote URLs, get a verdict, and keep infected files out of your app. It includes sync and asyncio clients, helpers for FastAPI and Django, and a command line tool.
+Official Python client for the [Kelpgate](https://kelpgate.cloud) malware-scanning API. It provides synchronous and asyncio clients with identical interfaces, manages OAuth 2.0 access tokens, retries transient failures idempotently and maps API responses to typed results and exceptions. The package includes FastAPI and Django integrations and a command-line interface. Its only runtime dependency is [httpx](https://www.python-httpx.org/).
 
-> This package is open source under the MIT license. It is a client for the Kelpgate scanning service, a hosted commercial product that is not part of this package. You need a Kelpgate account to use it.
+The package is open source under the MIT licence. The Kelpgate scanning service is a commercial hosted product; using it requires a Kelpgate account.
 
 ## Contents
 
-[Why Kelpgate](#why-kelpgate) · [How it works](#how-it-works) · [Install](#install) · [Quick start](#quick-start) · [Scanning](#scanning) · [Errors](#errors) · [Options](#options) · [FastAPI](#fastapi) · [Django](#django) · [Command line](#command-line) · [Failure policy](#failure-policy) · [Security and privacy](#security-and-privacy) · [Compatibility](#compatibility) · [Verify your setup](#verify-your-setup) · [Troubleshooting](#troubleshooting) · [Support and versioning](#support-and-versioning) · [Contributing and security](#contributing-and-security) · [License](#license)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Configuration](#configuration)
+- [Usage](#usage)
+- [Scan results](#scan-results)
+- [Errors](#errors)
+- [Retries and idempotency](#retries-and-idempotency)
+- [FastAPI](#fastapi)
+- [Django](#django)
+- [Command-line interface](#command-line-interface)
+- [Failure policy](#failure-policy)
+- [Security](#security)
+- [Troubleshooting](#troubleshooting)
+- [Compatibility and versioning](#compatibility-and-versioning)
+- [Development](#development)
+- [Support](#support)
+- [Licence](#licence)
 
-## Why Kelpgate
+## Requirements
 
-| | |
-| --- | --- |
-| **One call per file** | Send a path, bytes, a file object or a URL and get a verdict back. An infected file is a normal result, not an exception. |
-| **Sync and asyncio** | `KelpgateClient` and `AsyncKelpgateClient` have the same methods and are fully typed. |
-| **Credentials handled for you** | The OAuth 2.0 access token is fetched, cached in memory and renewed before it expires, one renewal at a time. |
-| **Predictable failure behavior** | Typed errors for quota, size, file type, rate limits and network problems. You choose what happens when the scanner cannot answer: block or allow. |
-| **Safe by default** | API and token URLs must use HTTPS, redirects are never followed, and secrets never appear in `repr()` or errors. |
-| **Ready for your stack** | FastAPI and Django helpers and a command line tool. One runtime dependency, [httpx](https://www.python-httpx.org/). |
+- Python 3.9 or later.
+- A Kelpgate API client (client ID and secret) created in the [Kelpgate Console](https://console.kelpgate.cloud).
 
-## How it works
-
-1. The client obtains an OAuth 2.0 access token with your client credentials. Tokens are cached and renewed shortly before they expire.
-2. The file is sent to the scanning API over HTTPS.
-3. The API answers with a verdict. A clean file and an infected file (HTTP 406) both come back as a result with `infected` set to `False` or `True`. Anything that stops a verdict, such as an exhausted quota or an unreachable service, is raised as a typed error. Your code, or the FastAPI and Django helpers, decide what to do next.
-
-## Install
+## Installation
 
 ```bash
 pip install kelpgate-client
 ```
 
-The package is `kelpgate-client` on PyPI and you import it as `kelpgate`. It needs Python 3.9 or newer. You also need a Kelpgate account.
+Optional integrations:
 
-## Quick start
+```bash
+pip install "kelpgate-client[fastapi]"
+pip install "kelpgate-client[django]"
+```
 
-Create an API client in the [Kelpgate Console](https://console.kelpgate.cloud), then:
+The distribution is `kelpgate-client`; the import package is `kelpgate`.
+
+## Configuration
 
 ```python
 from kelpgate import KelpgateClient
 
-kg = KelpgateClient(
+client = KelpgateClient(
     "https://api.kelpgate.cloud",
     token_url="https://auth.kelpgate.cloud/oauth2/token",
     client_id="...",
     client_secret="...",
 )
-
-result = kg.scan_file("upload.pdf")
-if result.infected:
-    print("Rejected:", result.signature)
 ```
 
-`KelpgateClient.from_env()` builds the same client from `KELPGATE_CLIENT_ID` and `KELPGATE_CLIENT_SECRET` (or `KELPGATE_TOKEN`), with optional `KELPGATE_API_URL` and `KELPGATE_TOKEN_URL`. Use the client as a context manager (`with KelpgateClient.from_env() as kg:`) so connections are closed.
+| Parameter | Default | Description |
+|---|---|---|
+| `api_url` | required | Base URL of the Kelpgate API (first positional argument) |
+| `token_url` | required with client credentials | OAuth 2.0 token endpoint |
+| `client_id`, `client_secret` | | Client credentials |
+| `bearer_token` | | Static access token, used instead of client credentials |
+| `scope` | `"scan"` | OAuth 2.0 scope requested |
+| `timeout` | `60.0` | Per-request timeout in seconds |
+| `max_retries` | `2` | Retries for network errors and HTTP 429, 502, 503 and 504 |
+| `retry_delay` | `0.5` | Base delay in seconds for exponential backoff |
+| `max_bytes` | 128 MiB | Largest file the client sends; larger files fail before upload |
+| `transport` | | Custom `httpx` transport, for proxies or tests |
 
-For asyncio, use `AsyncKelpgateClient` and `await` each call:
+`api_url` and `token_url` must use HTTPS; plain HTTP is accepted only for `localhost`.
+
+`KelpgateClient.from_env()` and `AsyncKelpgateClient.from_env()` read:
+
+| Variable | Default |
+|---|---|
+| `KELPGATE_CLIENT_ID`, `KELPGATE_CLIENT_SECRET` | |
+| `KELPGATE_TOKEN` | Static token, instead of client credentials |
+| `KELPGATE_API_URL` | `https://api.kelpgate.cloud` |
+| `KELPGATE_TOKEN_URL` | `https://auth.kelpgate.cloud/oauth2/token` |
+
+Use clients as context managers so that connections are released:
+
+```python
+with KelpgateClient.from_env() as client:
+    ...
+```
+
+## Usage
+
+```python
+from kelpgate import KelpgateClient, assert_clean
+
+with KelpgateClient.from_env() as client:
+    result = client.scan_file("upload.pdf")
+    if result.infected:
+        ...  # reject the upload
+
+    # Alternatively, raise InfectedError for an infected file:
+    assert_clean(client.scan_bytes(data, filename="report.docx"))
+```
+
+The asyncio client has the same methods:
 
 ```python
 from kelpgate import AsyncKelpgateClient
 
-async with AsyncKelpgateClient.from_env() as kg:
-    result = await kg.scan_bytes(data, filename="report.docx")
+async with AsyncKelpgateClient.from_env() as client:
+    result = await client.scan_bytes(data, filename="report.docx")
 ```
 
-## Scanning
+| Method | Description |
+|---|---|
+| `scan_file(source, ...)` | Scan a path, `bytes` or binary file object |
+| `scan_bytes(data, ...)` | Scan in-memory content |
+| `scan_url(url, ...)` | Have the service fetch and scan a URL |
+| `scan_file_async(source, ...)`, `scan_url_async(url, ...)` | Submit a background scan; returns `AcceptedScan` with `scan_id`. Accepts `webhook_url`. |
+| `get_async_result(scan_id)` | Returns `PendingScan` until the result is available, then `ScanResult` |
+| `wait_for_result(scan_id, interval=1, timeout=120)` | Poll until the result is available |
+| `health()` | Service readiness; requires no credentials |
 
-| Method | What it does |
-| --- | --- |
-| `scan_file(source)` | Scan a path, `bytes` or a binary file object |
-| `scan_bytes(data)` | Same, for bytes in memory |
-| `scan_url(url)` | Kelpgate fetches the URL and scans it |
-| `scan_file_async(source)`, `scan_url_async(url)` | Start an asynchronous scan and get a `scan_id`. Pass `webhook_url` to be called back |
-| `get_async_result(scan_id)` | A `PendingScan` until the verdict is ready, then a `ScanResult` |
-| `wait_for_result(scan_id, interval=1, timeout=120)` | Poll until the scan finishes |
-| `health()` | Service status. Needs no credentials |
+Upload methods accept `filename` and `idempotency_key`. Paths and seekable file objects are streamed; other streams are buffered in memory up to `max_bytes`. The 0.1 names `submit_file`, `submit_url`, `get_result` and `wait` remain available as aliases.
 
-The names match the other Kelpgate clients ([client standard](https://github.com/KelpGate/.github/blob/main/docs/client-standard.md)). The 0.1.x names `submit_file`, `submit_url`, `get_result` and `wait` still work as aliases.
+## Scan results
 
-A `ScanResult` has `infected`, `status`, `signature`, `sha256`, `scan_id`, `rule_authors`, `request_id` and the full response in `raw`. Two flags are worth checking:
+An infected file is a result, not an exception. `ScanResult` is an immutable dataclass:
 
-- `policy_rejected`: the file was refused by policy (for example a disallowed type), not detected as malware.
-- `degraded`: an engine did not finish, so coverage was reduced for this scan.
+| Attribute | Type | Description |
+|---|---|---|
+| `infected` | `bool` | `True` for malware or a policy rejection |
+| `status` | `str` | `CLEAN` or `INFECTED` |
+| `signature` | `str` | Detection names, joined with ` \| ` |
+| `policy_rejected` | `bool` | Rejected by policy (for example an encrypted archive) rather than detected |
+| `degraded` | `bool` | An engine did not complete; coverage was reduced |
+| `sha256` | `str \| None` | SHA-256 of the scanned content |
+| `rule_authors` | `tuple[str, ...]` | Authors of matching detection rules. Preserve them when displaying or forwarding a detection, as required by the Detection Rule License. |
+| `scan_id`, `request_id` | `str \| None` | Identifiers; quote `request_id` in support requests |
+| `filename`, `timestamp`, `s3_path`, `download_url` | `str \| None` | As returned by the service |
+| `raw` | `dict` | Response body as received |
 
-An infected file is a normal result, not an exception. Call `assert_clean(result)` if you prefer an exception. Paths and seekable file objects are streamed, not read into memory; other streams are buffered in memory up to `max_bytes`. A retry sends the whole file again.
-
-### Retries and your quota
-
-Every scan call sends an `Idempotency-Key`. The client makes a random one for each call and reuses it on its own retries, so a retry after a timeout or a 502, 503 or 504 is not counted against your quota twice. You do not have to do anything.
-
-Pass `idempotency_key` to protect retries you make yourself, for example one key per upload job:
-
-```python
-result = kg.scan_file(path, idempotency_key=f"job-{job.id}")
-```
-
-A key is 1 to 128 characters from `A-Za-z0-9._:-` (anything else raises `ConfigError`). The service ties a key to the file: the same key on a different file is counted as a new scan, so never reuse one key for different uploads.
+Integrations that require full coverage should treat `degraded` as not verified.
 
 ## Errors
 
-Every error derives from `KelpgateError` and carries `status`, `code`, `request_id` (quote it to support) and the response `body`.
+All exceptions derive from `KelpgateError` and expose `status`, `code`, `request_id` and `body`.
 
-| Error | When |
-| --- | --- |
-| `AuthError` | Bad credentials (401) or a suspended organization (403) |
-| `QuotaExceededError` | Plan quota used up (402); has `quota`, `usage`, `upgrade_url` |
-| `PayloadTooLargeError` | File over the plan limit (413) or the client's `max_bytes` |
-| `UnsupportedFileError` | File type not allowed, or an encrypted archive (415) |
-| `RateLimitedError` | Too many scans at once (429); has `retry_after` |
-| `ScanError` | Invalid request (400), unparsable file (412) or an unreadable path |
-| `ServerError` | 5xx |
-| `NetworkError`, `RequestTimeout` | The service could not be reached |
-| `ConfigError` | Wrong options, raised by the constructor |
-| `InfectedError` | Raised by `assert_clean` |
+| Exception | Condition |
+|---|---|
+| `ConfigError` | Invalid parameters or idempotency key; raised before any request |
+| `AuthError` | Credentials rejected (401), or organization or client not permitted (403) |
+| `QuotaExceededError` | Monthly quota exhausted (402). Exposes `quota`, `usage` and `upgrade_url`. |
+| `PayloadTooLargeError` | File over the plan or scanner limit (413), or over `max_bytes` |
+| `UnsupportedFileError` | File type not permitted, or archive rejected by policy (415) |
+| `RateLimitedError` | Concurrency limit reached (429). Exposes `retry_after`. |
+| `ScanError` | Invalid request (400), content that could not be parsed (412), or an unreadable local path |
+| `ServerError` | HTTP 5xx after retries |
+| `NetworkError`, `RequestTimeout` | The service could not be reached or did not respond in time |
+| `InfectedError` | Raised by `assert_clean`; exposes `result` |
+| `KelpgateError` | Any other status, including 404 and 422 |
 
-## Options
+## Retries and idempotency
 
-`api_url`, `token_url`, `client_id`, `client_secret` (or `bearer_token`), `scope` (default `scan`), `timeout` (60 s), `max_retries` (2), `retry_delay` (0.5 s), `max_bytes` (128 MiB), `transport`.
+Every scan request carries an `Idempotency-Key`. The client generates one per call and reuses it for its own retries, so a retried scan is not counted twice against the quota. Token renewal is serialised, and a rejected access token is discarded and the request retried once with a new token.
 
-Both URLs must be `https`; plain `http` is accepted only for `localhost`. Redirects are never followed, so credentials cannot be sent to another host. Secrets never appear in `repr()` or in error messages.
+Supply a key to make retries across process restarts or job re-runs idempotent:
+
+```python
+client.scan_file(path, idempotency_key=f"upload-{job.id}")
+```
+
+Keys are 1 to 128 characters from `A-Z a-z 0-9 . _ : -`. The service binds a key to the request content; reusing a key for a different file is counted as a new scan.
 
 ## FastAPI
 
@@ -133,105 +188,115 @@ kelpgate = AsyncKelpgateClient.from_env()
 
 @app.post("/upload")
 async def upload(file: UploadFile = Depends(scan_dependency(kelpgate))):
-    ...  # only reached for files that scanned clean
+    ...  # reached only for files that scanned clean
 ```
 
-An infected file gets a `422`. If the scan cannot run the request gets a `503` (`on_error="allow"` lets it through instead). For a field with another name, call `scan_upload(client, upload)` yourself.
+An infected file raises `HTTPException(422)`. When no verdict is available the dependency raises `402`, `413`, `415` or `503` according to the error, unless created with `on_error="allow"`. For an upload field with another name, call `scan_upload(client, upload)` directly.
 
 ## Django
 
 ```python
 # settings.py
-KELPGATE = {"CLIENT_ID": "...", "CLIENT_SECRET": "..."}   # or the KELPGATE_* environment variables
+KELPGATE = {"CLIENT_ID": "...", "CLIENT_SECRET": "..."}  # or the KELPGATE_* environment variables
 
 # models.py
 from kelpgate.integrations.django import KelpgateValidator
 
 class Document(models.Model):
-    file = models.FileField(upload_to="docs/", validators=[KelpgateValidator()])
+    file = models.FileField(upload_to="documents/", validators=[KelpgateValidator()])
 ```
 
-An infected file fails validation with the code `infected`. If the scan cannot run, validation fails with `scan_unavailable`, or passes with `KelpgateValidator(on_error="allow")`.
+An infected file fails validation with code `infected`. When no verdict is available, validation fails with code `scan_unavailable`, unless the validator is created with `on_error="allow"`.
 
-## Command line
+## Command-line interface
 
 ```bash
 export KELPGATE_CLIENT_ID=... KELPGATE_CLIENT_SECRET=...
-kelpgate scan ./file.zip other.pdf
-kelpgate scan -r ./uploads          # a whole folder, 4 files at a time (-w to change)
+kelpgate scan ./archive.zip ./report.pdf
+kelpgate scan --recursive --workers 8 ./uploads
 kelpgate scan-url https://example.com/file.exe
 kelpgate health
 ```
 
-Exit code `0` clean, `1` infected, `2` error. Add `--json` for one JSON object per line. Folders are scanned without following symbolic links.
+| Exit code | Meaning |
+|---|---|
+| `0` | All files clean |
+| `1` | At least one file infected |
+| `2` | Error |
+
+`--json` prints one JSON object per line. Recursive scans do not follow symbolic links; `--workers` defaults to 4.
 
 ## Failure policy
 
-When the scanner cannot give a verdict, the client raises a typed error. The FastAPI and Django helpers turn that into a decision you control with `on_error`.
+When the service cannot return a verdict, the client raises. The integrations convert the exception according to `on_error`:
 
-| Situation | Client | FastAPI, `on_error="block"` (default) | Django, `on_error="block"` (default) | `on_error="allow"` |
-| --- | --- | --- | --- | --- |
-| Scanner unreachable, timed out or returned 5xx after retries | Raises `NetworkError`, `RequestTimeout` or `ServerError` | `503` | Validation error `scan_unavailable` | Upload continues |
-| Authentication fails | Raises `AuthError` | `503` | `scan_unavailable` | Continues |
-| Plan quota used up | Raises `QuotaExceededError` | `402` | `scan_unavailable` | Continues |
-| File over the plan limit or `max_bytes` | Raises `PayloadTooLargeError` | `413` | `scan_unavailable` | Continues |
-| File type not allowed | Raises `UnsupportedFileError` | `415` | `scan_unavailable` | Continues |
+| Condition | Client | FastAPI, `block` | Django, `block` | `allow` |
+|---|---|---|---|---|
+| Service unreachable, timed out, or 5xx after retries | `NetworkError`, `RequestTimeout`, `ServerError` | `503` | `scan_unavailable` | Continue |
+| Authentication failed | `AuthError` | `503` | `scan_unavailable` | Continue |
+| Quota exhausted | `QuotaExceededError` | `402` | `scan_unavailable` | Continue |
+| File too large | `PayloadTooLargeError` | `413` | `scan_unavailable` | Continue |
+| File type not permitted | `UnsupportedFileError` | `415` | `scan_unavailable` | Continue |
 
-Choose `block` where stopping malware matters more than availability, and `allow` where uploads must keep working during an outage.
+Use `block` where preventing malware takes priority over availability, and `allow` where uploads must continue during a service outage.
 
-## Security and privacy
+## Security
 
-- **What leaves your server:** the uploaded file and its file name, sent over HTTPS to the API URL you configure. Nothing else about your application is sent.
-- **Transport:** API and token endpoints must use HTTPS (plain HTTP is accepted only for `localhost`). Redirects are never followed.
-- **Secrets:** the client secret never appears in `repr()` or in error messages. Keep it in an environment variable or a secrets manager, not in source control.
-- **Token handling:** access tokens are kept in memory only, never written to disk, and refreshed ahead of expiry. A rejected token is discarded and retried once.
-- **Nothing stored locally:** the package writes nothing to disk. Files are read from where they already are.
-- **Data kept by the service:** files that scan clean are kept briefly and infected files are quarantined, according to your Kelpgate plan. That is the service's behavior, not this package's.
+| Aspect | Behaviour |
+|---|---|
+| Data sent | The file content and its name, over HTTPS, to the configured `api_url` only |
+| Transport | HTTPS required except for `localhost`; redirects are never followed |
+| Credentials | Never included in `repr()` or exception messages |
+| Tokens | Held in memory only and renewed before expiry |
+| Local storage | The package writes nothing to disk |
+| Service retention | Clean files are retained briefly and infected files quarantined, according to the Kelpgate plan |
 
-## Compatibility
-
-Python 3.9, 3.10, 3.11, 3.12 and 3.13, with `httpx` 0.25 or later. The test suite runs on every one of those Python versions, with Django 4.2, 5.2 and 6.1 and a current FastAPI.
-
-## Verify your setup
-
-Download the standard EICAR test file from [eicar.org](https://www.eicar.org/download-anti-malware-testfile/). It is a harmless file that every scanner treats as a virus.
-
-```bash
-kelpgate scan ./eicar.com
-```
-
-The scan should report `INFECTED` and exit with code `1`. Then scan any ordinary file and confirm it reports `clean` and exits with `0`.
+Report vulnerabilities according to the [security policy](https://github.com/KelpGate/.github/blob/main/SECURITY.md).
 
 ## Troubleshooting
 
-| Symptom | Likely cause |
-| --- | --- |
-| `ConfigError`: must use https | `api_url` or `token_url` is not HTTPS. Plain HTTP works only for `localhost`. |
-| `AuthError` with code `TOKEN_REQUEST_FAILED` | The client ID or secret is wrong, or the API client does not have the `scan` scope. |
-| `AuthError` with status 403 | The organization is suspended, or the API client is not linked to an organization. |
-| `QuotaExceededError` | The plan's scan quota is used up. The error carries an `upgrade_url`. |
-| `RateLimitedError`, or slow scans under load | Too many scans at once. The client retries and honours `Retry-After`; lower your concurrency. |
-| `PayloadTooLargeError` | The file is over the plan limit or the client's `max_bytes`. |
-| `RequestTimeout` on large files | Raise `timeout`, or use `scan_file_async` and `wait_for_result`. |
-| Clean results with `degraded` set | An engine did not finish for that scan. The result is still valid; coverage was reduced. |
+Verify an installation with the [EICAR test file](https://www.eicar.org/download-anti-malware-testfile/), which every scanner reports as infected:
 
-## Support and versioning
+```bash
+kelpgate scan ./eicar.com    # INFECTED, exit code 1
+```
 
-This project follows [Semantic Versioning](https://semver.org): breaking changes only in major versions, new features in minor versions, fixes in patch versions. Releases are tagged on GitHub, and user-visible changes are listed in the [changelog](CHANGELOG.md).
+| Symptom | Cause |
+|---|---|
+| `ConfigError: ... must use https` | `api_url` or `token_url` is not HTTPS |
+| `AuthError` with code `TOKEN_REQUEST_FAILED` | Invalid client ID or secret, or the client lacks the `scan` scope |
+| `AuthError` with status 403 | Organization suspended, or client not linked to an organization |
+| `RateLimitedError` | Too many concurrent scans; the client honours `Retry-After`. Reduce concurrency. |
+| `RequestTimeout` on large files | Increase `timeout`, or use `scan_file_async` with `wait_for_result` |
+| `degraded` is `True` | An engine did not complete for that scan |
 
-Fixes, including security fixes, go into the latest release only, so upgrade to receive them. The tested runtime versions are listed under Compatibility. The client talks to version 1 of the Kelpgate API (`/api/v1`).
+## Compatibility and versioning
 
-For help, see [getting help](https://github.com/KelpGate/.github/blob/main/SUPPORT.md) or email support@kelpgate.cloud.
+| Component | Supported |
+|---|---|
+| Python | 3.9, 3.10, 3.11, 3.12, 3.13 (tested in CI) |
+| httpx | 0.25 or later, below 1.0 |
+| FastAPI | 0.100 or later (`fastapi` extra) |
+| Django | 4.2 or later (`django` extra) |
+| Kelpgate API | Version 1 (`/api/v1`) |
 
-## Contributing and security
+The package is fully typed (`py.typed`). It follows [Semantic Versioning](https://semver.org); fixes, including security fixes, are released for the latest version only. Changes are listed in the [changelog](CHANGELOG.md). The organisation-wide policy is in [versioning and releases](https://github.com/KelpGate/.github/blob/main/docs/versioning-and-releases.md).
 
-Bug reports and pull requests are welcome; see the [contributing guide](https://github.com/KelpGate/.github/blob/main/CONTRIBUTING.md). To report a vulnerability, email security@kelpgate.cloud or follow the [security policy](https://github.com/KelpGate/.github/blob/main/SECURITY.md). For help, see [getting help](https://github.com/KelpGate/.github/blob/main/SUPPORT.md).
+## Development
 
 ```bash
 pip install -e ".[dev]"
-pytest && ruff check . && mypy
+pytest
+ruff check .
+mypy
 ```
 
-## License
+Contributions follow the [contributing guide](https://github.com/KelpGate/.github/blob/main/CONTRIBUTING.md).
 
-MIT. See [LICENSE](LICENSE). You can use this package in open-source and proprietary software alike. The Kelpgate scanning service it connects to is a hosted commercial product with its own terms.
+## Support
+
+See [getting help](https://github.com/KelpGate/.github/blob/main/SUPPORT.md) or contact support@kelpgate.cloud.
+
+## Licence
+
+MIT. See [LICENSE](LICENSE). The Kelpgate scanning service is subject to its own terms.
